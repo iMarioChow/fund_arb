@@ -158,7 +158,7 @@ def set_leverage(symbol, buy_leverage=5, sell_leverage=5):
     )
 
 # === Place market order
-def place_market_order(symbol, side, qty):
+def place_market_order_bybit(symbol, side, qty):
     return session.place_order(
         category="linear",
         symbol=symbol,
@@ -170,7 +170,7 @@ def place_market_order(symbol, side, qty):
 # === Close position
 def close_position(symbol, side, qty):
     close_side = "Sell" if side == "Buy" else "Buy"
-    return place_market_order(symbol, close_side, qty)
+    return place_market_order_bybit(symbol, close_side, qty)
 
 # === Pretty print
 def pretty_print(data):

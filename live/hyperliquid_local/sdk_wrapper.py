@@ -62,7 +62,7 @@ def place_limit_order(
     )
 
 # === ⚡️ Market Order
-def place_market_order(
+def place_market_order_hl(
     asset: str,
     is_buy: bool,
     size: float,
