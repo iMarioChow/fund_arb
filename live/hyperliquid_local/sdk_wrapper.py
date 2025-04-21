@@ -121,23 +121,21 @@ def get_predicted_funding(symbol):
             headers={"Content-Type": "application/json"}
         )
         if response.status_code != 200:
-            return 0.0, None
+            return 0.0, None, 1.0  # default to 1h if error
 
         data = response.json()
         for asset_entry in data:
             if asset_entry[0].upper() == symbol.upper():
                 for venue, details in asset_entry[1]:
                     if venue == "HlPerp":
-                        funding_rate = float(details.get("fundingRate", 0)) * 100
+                        rate = float(details.get("fundingRate", 0)) * 100
                         next_ts = details.get("nextFundingTime", None)
+                        interval_ms = details.get("fundingIntervalMs", 3600000)  # usually 1h
 
-                        # Add 1 hour (3600000ms) to the current time for comparison
-                        next_funding_time = next_ts + 3600000 if next_ts else None
-                        if next_funding_time and next_funding_time > int(time.time() * 1000):
-                            return funding_rate, next_funding_time
-                        else:
-                            return funding_rate, None
-        return 0.0, None
+                        interval_h = round(interval_ms / (1000 * 60 * 60), 2)
+                        return rate, next_ts, interval_h
+
+        return 0.0, None, 1.0
     except Exception as e:
-        print(f"⚠️ Failed to fetch predicted funding: {e}")
-        return 0.0, None
+        print(f"⚠️ Failed to fetch HL funding: {e}")
+        return 0.0, None, 1.0

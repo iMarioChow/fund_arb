@@ -21,35 +21,26 @@ session = HTTP(
 import time
 
 def get_funding_info(symbol):
-    """
-    Returns normalized hourly funding rate and next funding time
-    """
     try:
-        # Get current ticker info
         data = session.get_tickers(category="linear", symbol=symbol)
         ticker = data["result"]["list"][0]
-        
-        # Get funding periods to determine interval
-        last_ts, next_ts = get_funding_periods(symbol)
-        
-        if last_ts and next_ts:
-            # Calculate actual funding interval in hours
-            funding_interval = (next_ts - last_ts) / (1000 * 60 * 60)
-            
-            # Get current predicted funding rate
-            predicted_funding = safe_float(ticker.get("fundingRate", 0)) * 100
-            
-            # Calculate hourly rate using actual interval
-            predicted_hourly = predicted_funding / funding_interval
-            
-            return round(predicted_hourly, 6), next_ts
+
+        # Correct variable names!
+        prev_ts, next_ts = get_funding_periods(symbol)
+
+        if prev_ts and next_ts:
+            interval_ms = next_ts - prev_ts
+            interval_hours = round(interval_ms / (1000 * 60 * 60*2), 2)
+
+            predicted_funding = safe_float(ticker.get("fundingRate", 0)) * 100  # % per period
+
+            return round(predicted_funding, 6), next_ts, interval_hours
         else:
-            print(f"⚠️ Could not determine funding interval for {symbol}")
-            return 0.0, None
-            
+            return 0.0, None, 0.0
+
     except Exception as e:
         print(f"⚠️ Failed to get funding info for {symbol}: {e}")
-        return 0.0, None
+        return 0.0, None, 0.0
 
 
 def safe_float(val, default=0.0):
@@ -127,6 +118,7 @@ def get_positions():
     except Exception as e:
         return {"retCode": -1, "retMsg": str(e)}
 
+
 # === Get price
 def get_price(symbol):
     try:
@@ -176,37 +168,41 @@ def close_position(symbol, side, qty):
 def pretty_print(data):
     pprint.pprint(data)
 
-# === Get Funding Periods (Last and Next)
 def get_funding_periods(symbol):
     try:
-        # Ensure symbol is valid (has USDT suffix)
         if not symbol.endswith("USDT"):
             symbol = f"{symbol}USDT"
 
-        # Get funding rate history (last funding rate)
         history = session.get_funding_rate_history(
             category="linear",
             symbol=symbol,
-            limit=2  # Get the last two funding periods (last and next)
+            limit=5
         )
 
-        # Check if the history list is valid
-        if len(history["result"]["list"]) < 2:
-            print(f"⚠️ Insufficient funding history data for {symbol}")
-            return None, None
+        entries = history["result"]["list"]
+        timestamps = [int(entry["fundingRateTimestamp"]) for entry in entries]
 
-        # Extract funding period information as timestamps (in milliseconds)
-        last_funding = history["result"]["list"][1]
-        last_funding_timestamp = int(last_funding["fundingRateTimestamp"])
 
-        next_funding = history["result"]["list"][0]
-        next_funding_timestamp = int(next_funding["fundingRateTimestamp"])
+        timestamps.sort(reverse=True)
 
-        return last_funding_timestamp, next_funding_timestamp
+        for i in range(len(timestamps) - 1):
+            last_ts = timestamps[i]
+            prev_ts = timestamps[i + 1]
+            interval_ms = last_ts - prev_ts
+            interval_h = interval_ms / (1000 * 60 * 60)
+
+            if interval_ms > 0:
+                next_ts = last_ts + interval_ms
+                return prev_ts, next_ts
+
+        print(f"❌ No valid interval found for {symbol}")
+        return None, None
 
     except Exception as e:
         print(f"⚠️ Failed to get funding periods for {symbol}: {e}")
         return None, None
+
+
 
 # === Test function
 if __name__ == "__main__":
