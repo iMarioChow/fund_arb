@@ -296,7 +296,8 @@ def display_status_fixed():
         hl_sz = safe_float(hl.get("szi"))
         hl_entry = safe_float(hl.get("entryPx"))
         hl_side = "LONG" if hl_sz > 0 else "SHORT" if hl_sz < 0 else "-"
-        hl_net_pnl = f"{hl_pnls.get(symbol, 0.0):+.2f}"
+        hl_net_pnl_val = hl_pnls.get(symbol, 0.0)
+        hl_net_pnl = f"{hl_net_pnl_val:+.2f}"
         hl_usd_size = hl_sz * safe_float(hl_mids.get(symbol, 0))  # USD size for HL position
 
         by = bybit_position_map.get(symbol, {})
@@ -305,12 +306,40 @@ def display_status_fixed():
         if by_entry == 0 and by_sz > 0:
             by_entry = safe_float(by.get("positionValue", 0)) / by_sz
         by_side = by.get("side", "-") if by else "-"
-        by_net_pnl = f"{bybit_pnls.get(symbol, 0.0):+.2f}"
+        by_net_pnl_val = bybit_pnls.get(symbol, 0.0)
+        by_net_pnl = f"{by_net_pnl_val:+.2f}"
         by_usd_size = by_sz * safe_float(bybit_position_map.get(symbol, {}).get("markPrice", 0))  # USD size for Bybit position
 
-        total_net_pnl = hl_pnls.get(symbol, 0.0) + bybit_pnls.get(symbol, 0.0)
+        total_net_pnl = hl_net_pnl_val + by_net_pnl_val
 
-        print(f"{symbol:<10}| {hl_side:<8}| {hl_usd_size:<12.2f}| {hl_entry:<10.4f}| {hl_net_pnl:<8}|| {by_side:<8}| {by_usd_size:<12.2f}| {by_entry:<10.4f}| {by_net_pnl:<8}|| {total_net_pnl:+.2f}")
+        # === Funding Arbitrage Analysis ===
+        hl_rate, _, hl_interval = get_predicted_funding(symbol)
+        hl_rate_hourly = hl_rate / hl_interval if hl_interval else hl_rate
+
+        by_rate, _, by_interval = get_funding_info(f"{symbol}USDT")
+        by_rate_hourly = by_rate / by_interval if by_interval else by_rate
+
+        hl_receives = hl_sz < 0
+        by_receives = by_side.upper() == "SELL"
+
+        net_rate_hourly = 0.0
+        if hl_receives and not by_receives:
+            net_rate_hourly = hl_rate_hourly - by_rate_hourly
+        elif not hl_receives and by_receives:
+            net_rate_hourly = by_rate_hourly - hl_rate_hourly
+        elif hl_receives and by_receives:
+            net_rate_hourly = hl_rate_hourly + by_rate_hourly
+        else:
+            net_rate_hourly = - (hl_rate_hourly + by_rate_hourly)
+
+        hedged_notional = min(abs(hl_sz * safe_float(hl_mids.get(symbol, 0))), abs(by_sz * safe_float(by.get("markPrice", 0))))
+        arb_pnl_hourly = net_rate_hourly / 100 * hedged_notional if hedged_notional > 0 else 0
+        arb_pnl_display = f"{arb_pnl_hourly:+.4f}/h" if hedged_notional > 0 else "-"
+
+        # === Print line with added arbitrage insight
+        print(f"{symbol:<10}| {hl_side:<8}| {hl_usd_size:<12.2f}| {hl_entry:<10.4f}| {hl_net_pnl:<8}|| "
+            f"{by_side:<8}| {by_usd_size:<12.2f}| {by_entry:<10.4f}| {by_net_pnl:<8}|| "
+            f"{total_net_pnl:+.2f} | 🔁 {arb_pnl_display}")
 
     total_net_pnl = sum(hl_pnls.get(sym, 0.0) + bybit_pnls.get(sym, 0.0) for sym in all_symbols)
 
@@ -318,67 +347,68 @@ def display_status_fixed():
     print(f"💰 HL Account Value: {hl_account_value:.2f} USD | BYBIT Account Value: {bybit_account_value:.2f} USD | Total Value: {hl_account_value + bybit_account_value:.2f} USD")
     print(f"💸 Total Net PnL: {total_net_pnl:+.2f} USD")
 
-     # Update Funding Rates Table with PnL calculation
-    print("\n📈 Current Funding Rates (Hourly) & Expected Funding PnL")
-    print("====================================================================================================")
-    print(f"{'Symbol':<10}| {'HL Rate/h':<10}| {'BY Rate/h':<10}| {'Next Funding':<20}| {'Est. Funding/h':<25}")
-    print("----------------------------------------------------------------------------------------------------")
+    print("\n📈 Current Funding Rates (Hourly) & Estimated Funding PnL")
+    print("=" * 95)
+    print(f"{'Symbol':<10}| {'HL Rate/h':<10}| {'BY Rate/h':<10}| {'HL Next Funding':<20}| {'BY Next Funding':<20}| {'Est. Funding/h'}")
+    print("-" * 95)
 
     for symbol in all_symbols:
-        hl_rate, hl_next = get_predicted_funding(symbol)
-        by_rate, by_next = get_funding_info(f"{symbol}USDT")
+        # === Fetch normalized rates & funding times
+        hl_rate, hl_next, hl_interval = get_predicted_funding(symbol)
+        hl_rate_hourly = hl_rate / hl_interval if hl_interval else hl_rate
 
-        # Get position sizes and prices
+        by_rate, by_next, by_interval = get_funding_info(f"{symbol}USDT")
+        by_rate_hourly = by_rate / by_interval if by_interval else by_rate
+
+        # === Fetch positions and mark prices
         hl_sz = safe_float(hl_position_map.get(symbol, {}).get("szi", 0))
-        by_sz = safe_float(bybit_position_map.get(symbol, {}).get("size", 0))
-        by_side = bybit_position_map.get(symbol, {}).get("side", "-")
-        if by_side == "Sell":
-            by_sz = -by_sz
+        by_pos = bybit_position_map.get(symbol, {})
+        by_sz = safe_float(by_pos.get("size", 0))
+        by_side = by_pos.get("side", "-").upper()
+
+        if by_side == "SELL":
+            by_sz = -by_sz  # treat short as negative size
 
         hl_mark = float(hl_mids.get(symbol, 0))
-        by_mark = safe_float(bybit_position_map.get(symbol, {}).get("markPrice", 0))
+        by_mark = safe_float(by_pos.get("markPrice", 0))
         if by_mark == 0:
-            by_mark = hl_mark
+            by_mark = hl_mark  # fallback to HL if Bybit mid is missing
 
-        # Calculate funding PnL per hour
-        if hl_sz > 0:  # Long position
-            hl_funding_pnl = -(hl_sz * hl_mark * hl_rate / 100)
-        else:  # Short position
-            hl_funding_pnl = (abs(hl_sz) * hl_mark * hl_rate / 100)
+        # === Determine effective hedged notional size
+        hl_usd = abs(hl_sz * hl_mark)
+        by_usd = abs(by_sz * by_mark)
+        hedged_notional = min(hl_usd, by_usd)
 
-        if by_sz > 0:  # Long position
-            by_funding_pnl = -(by_sz * by_mark * by_rate / 100)
-        else:  # Short position
-            by_funding_pnl = (abs(by_sz) * by_mark * by_rate / 100)
+        # === Determine who pays/receives
+        hl_receives = hl_sz < 0  # HL SHORT → receives if rate > 0
+        by_receives = by_side == "SELL"
 
-        total_funding_pnl = hl_funding_pnl + by_funding_pnl
-
-        # Calculate total position value for percentage
-        hl_pos_value = abs(hl_sz * hl_mark) if hl_sz != 0 else 0
-        by_pos_value = abs(by_sz * by_mark) if by_sz != 0 else 0
-        total_pos_value = hl_pos_value + by_pos_value
-
-        # Calculate percentage return
-        hourly_pct = (total_funding_pnl / total_pos_value * 100) if total_pos_value > 0 else 0
-
-        # Format next funding time
-        next_funding_time = ""
-        if hl_next:
-            next_funding_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(hl_next / 1000))
-        elif by_next:
-            next_funding_time = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(by_next / 1000))
-
-        # Format rates with consistent precision
-        hl_rate_str = f"{hl_rate:>8.4f}%" if hl_rate != 0 else " " * 9
-        by_rate_str = f"{by_rate:>8.4f}%" if by_rate != 0 else " " * 9
-
-        # Format funding PnL with both USD and percentage
-        if total_pos_value > 0:
-            funding_display = f"{total_funding_pnl:>+.4f} USD ({hourly_pct:>+.4f}%/h)"
+        if hl_receives and not by_receives:
+            net_rate_hourly = hl_rate_hourly - by_rate_hourly
+        elif not hl_receives and by_receives:
+            net_rate_hourly = by_rate_hourly - hl_rate_hourly
+        elif hl_receives and by_receives:
+            net_rate_hourly = hl_rate_hourly + by_rate_hourly
         else:
-            funding_display = "-"
+            net_rate_hourly = - (hl_rate_hourly + by_rate_hourly)
 
-        print(f"{symbol:<10}| {hl_rate_str}| {by_rate_str}| {next_funding_time:<20}| {funding_display:<25}")
+        # === Estimate funding arbitrage PnL
+        arb_pnl = net_rate_hourly / 100 * hedged_notional if hedged_notional > 0 else 0
+        arb_pct = (arb_pnl / hedged_notional * 100) if hedged_notional > 0 else 0
+
+        # === Format for display
+        hl_rate_str = f"{hl_rate_hourly:+.5f}%"
+        by_rate_str = f"{by_rate_hourly:+.5f}%"
+        hl_next_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(hl_next / 1000)) if hl_next else "-"
+        by_next_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(by_next / 1000)) if by_next else "-"
+        arb_str = f"{arb_pnl:+.5f} USD ({arb_pct:+.5f}%/h)" if hedged_notional > 0 else "-"
+
+        print(f"{symbol:<10}| {hl_rate_str:<10}| {by_rate_str:<10}| {hl_next_str:<20}| {by_next_str:<20}| {arb_str}")
+
+
+    print("-" * 95)
+
+
         
     print("---------------------------------------------------------------------------------------------------------------------------------")
     print("\n💡 Available Commands:")
