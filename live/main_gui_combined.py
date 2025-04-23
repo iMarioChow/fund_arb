@@ -196,7 +196,9 @@ def place_trade_both_exchanges():
         symbol_input = input("🔍 Symbol (e.g. BTC): ").strip().upper()
         symbol_bybit = symbol_input if symbol_input.endswith("USDT") else f"{symbol_input}USDT"
 
-        qty = calculate_qty(symbol_bybit, trade_usd)
+        leveraged_usd = trade_usd 
+        qty = calculate_qty(symbol_bybit, leveraged_usd)
+        
         if qty <= 0:
             print("❌ Invalid quantity, cannot proceed.")
             return
@@ -337,9 +339,9 @@ def display_status_fixed():
         arb_pnl_display = f"{arb_pnl_hourly:+.4f}/h" if hedged_notional > 0 else "-"
 
         # === Print line with added arbitrage insight
-        print(f"{symbol:<10}| {hl_side:<8}| {hl_usd_size:<12.2f}| {hl_entry:<10.4f}| {hl_net_pnl:<8}|| "
-            f"{by_side:<8}| {by_usd_size:<12.2f}| {by_entry:<10.4f}| {by_net_pnl:<8}|| "
-            f"{total_net_pnl:+.2f} | 🔁 {arb_pnl_display}")
+        print(f"{symbol:<10}| {hl_side:<8}| {hl_usd_size:<12.2f}| {hl_entry:<10.4f}| {hl_net_pnl:<8}  || "
+            f"{by_side:<8}| {by_usd_size:<12.2f}| {by_entry:<10.4f}| {by_net_pnl:<8}  || "
+            f"{total_net_pnl:+.2f}")
 
     total_net_pnl = sum(hl_pnls.get(sym, 0.0) + bybit_pnls.get(sym, 0.0) for sym in all_symbols)
 
@@ -418,24 +420,19 @@ def display_status_fixed():
     print("4. quit  - Exit program")
 
 
+
 def auto_refresh():
     while True:
         os.system("cls" if os.name == "nt" else "clear")
         display_status_fixed()
         time.sleep(200)
-
-
+        
 def main():
     print("📟 Combined Trader v2")
     threading.Thread(target=auto_refresh, daemon=True).start()
 
+
     while True:
-        print("\n💡 Available Commands:")
-        print("1. open  - Open new positions")
-        print("2. close - Close positions")
-        print("3. refresh - Refresh status")
-        print("4. quit  - Exit program")
-        cmd = input("🎯 Enter command: ").strip().lower()
 
         if cmd == "1":
             place_trade_both_exchanges()

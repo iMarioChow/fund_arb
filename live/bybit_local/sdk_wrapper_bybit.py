@@ -161,8 +161,13 @@ def place_market_order_bybit(symbol, side, qty):
 
 # === Close position
 def close_position(symbol, side, qty):
-    close_side = "Sell" if side == "Buy" else "Buy"
-    return place_market_order_bybit(symbol, close_side, qty)
+    return session.place_order(
+        category="linear",
+        symbol=symbol,
+        side=side,  # ✅ Use the passed side
+        orderType="Market",
+        qty=qty
+    )
 
 # === Pretty print
 def pretty_print(data):
