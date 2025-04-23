@@ -2,11 +2,212 @@ import time
 import threading
 import sys
 import os
+import pandas as pd
+import numpy as np
 from hyperliquid_local.sdk_wrapper import *
 from bybit_local.sdk_wrapper_bybit import *
+import requests
+import json
+from datetime import datetime, timedelta
 
 # Initialize global variables
 open_positions_list = []
+WATCHED_TOKENS = set()  # Set to store tokens being watched
+
+# Load configuration
+def load_config():
+    try:
+        with open('config.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print("⚠️ config.json not found. Please create it with your API keys.")
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print("⚠️ Error reading config.json. Please ensure it's valid JSON.")
+        sys.exit(1)
+
+CONFIG = load_config()
+COINALYZE_API_KEY = CONFIG.get('coinalyze', {}).get('api_key')
+
+def analyze_historical_data(token, days=30):
+    """
+    Analyze historical funding rate data for a given token
+    Returns a dictionary with analysis results
+    """
+    try:
+        # Get current time and calculate start time
+        end_time = int(time.time())
+        start_time = end_time - (days * 24 * 60 * 60)
+        
+        # Fetch funding rate history
+        symbols = [f"{token}USDT.6", f"{token}.H"]
+        interval = "1hour"
+        
+        # Fetch data from Coinalyze API
+        BASE_URL = "https://api.coinalyze.net/v1/funding-rate-history"
+        
+        params = {
+            "symbols": ",".join(symbols),
+            "interval": interval,
+            "from": start_time,
+            "to": end_time,
+            "api_key": COINALYZE_API_KEY
+        }
+        
+        response = requests.get(BASE_URL, params=params)
+        data = response.json()
+        
+        if not data:
+            return None
+            
+        # Get current funding rates
+        by_rate, _, by_interval = get_funding_info(f"{token}USDT")
+        by_rate_hourly = by_rate / by_interval if by_interval else by_rate
+        
+        hl_rate, _, hl_interval = get_predicted_funding(token)
+        hl_rate_hourly = hl_rate / hl_interval if hl_interval else hl_rate
+        
+        # Process the data
+        funding_dict = {}
+        for entry in data:
+            symbol = entry.get('symbol', 'Unknown')
+            exchange = 'Bybit' if symbol.endswith('.6') else 'Hyperliquid'
+            history = entry.get('history', [])
+            
+            for record in history:
+                timestamp = record.get('t')
+                funding_rate = record.get('c')
+                
+                # Normalize Bybit funding rate to hourly
+                if exchange == 'Bybit':
+                    funding_rate = funding_rate / by_interval  # BYBIT_HOURLY_DIVISOR
+                    
+                if timestamp not in funding_dict:
+                    funding_dict[timestamp] = {}
+                    
+                funding_dict[timestamp][exchange] = {
+                    'symbol': symbol,
+                    'funding_rate': funding_rate
+                }
+        
+        # Convert to DataFrame
+        records = []
+        for timestamp, exchanges in sorted(funding_dict.items()):
+            if 'Bybit' in exchanges and 'Hyperliquid' in exchanges:
+                bybit_data = exchanges['Bybit']
+                hyper_data = exchanges['Hyperliquid']
+                
+                # Calculate which side is better to long
+                bybit_rate = bybit_data['funding_rate']
+                hyper_rate = hyper_data['funding_rate']
+                
+                # If Bybit rate is lower, long Bybit and short Hyperliquid
+                # If Hyperliquid rate is lower, long Hyperliquid and short Bybit
+                long_side = 'Bybit' if bybit_rate < hyper_rate else 'Hyperliquid'
+                arbitrage_rate = abs(bybit_rate - hyper_rate)
+                
+                records.append({
+                    'Date': datetime.utcfromtimestamp(timestamp),
+                    'Symbol1': bybit_data['symbol'],
+                    'Exchange1': 'Bybit',
+                    'FundingRate1': bybit_rate,
+                    'Symbol2': hyper_data['symbol'],
+                    'Exchange2': 'Hyperliquid',
+                    'FundingRate2': hyper_rate,
+                    'Long': long_side,
+                    'Arbitrage Rate': arbitrage_rate
+                })
+        
+        df = pd.DataFrame(records)
+        
+        # Calculate statistics
+        HOURS_7D = 168
+        HOURS_30D = 720
+        
+        # Calculate success rates and APR for each period
+        def calculate_period_stats(df_period):
+            # Filter out zero arbitrage opportunities
+            df_period = df_period[df_period['Arbitrage Rate'] > 0]
+            
+            if len(df_period) == 0:
+                return {
+                    'bybit_success': 0,
+                    'better_side': 'None',
+                    'better_apr': 0,
+                    'max_arb': 0,
+                    'min_arb': 0,
+                    'zero_rate_pct': 100
+                }
+            
+            bybit_long_count = (df_period['Long'] == 'Bybit').sum()
+            total_count = len(df_period)
+            bybit_success_rate = (bybit_long_count / total_count) * 100 if total_count > 0 else 0
+            
+            # Calculate total funding earned when longing each side
+            bybit_total_rate = df_period[df_period['Long'] == 'Bybit'].apply(
+                lambda x: x['FundingRate2'] - x['FundingRate1'], axis=1).sum()
+            hyper_total_rate = df_period[df_period['Long'] == 'Hyperliquid'].apply(
+                lambda x: x['FundingRate1'] - x['FundingRate2'], axis=1).sum()
+            
+            # Calculate APR based on the period length (7D or 30D)
+            period_days = min(7, len(df_period)/24)  # Actual number of days in the period
+            if len(df_period) > 168:  # If it's 30D period
+                period_days = min(30, len(df_period)/24)
+            
+            bybit_apr = (bybit_total_rate / period_days) * 365
+            hyper_apr = (hyper_total_rate / period_days) * 365
+            
+            # Determine which side is more profitable
+            better_side = 'Bybit' if bybit_apr > hyper_apr else 'Hyperliquid'
+            better_apr = max(bybit_apr, hyper_apr)
+            
+            # Calculate max and min arbitrage rates for the better side
+            if better_side == 'Bybit':
+                # When long Bybit, arbitrage rate is Hyperliquid rate - Bybit rate
+                arbitrage_rates = df_period.apply(lambda x: x['FundingRate2'] - x['FundingRate1'], axis=1)
+            else:
+                # When long Hyperliquid, arbitrage rate is Bybit rate - Hyperliquid rate
+                arbitrage_rates = df_period.apply(lambda x: x['FundingRate1'] - x['FundingRate2'], axis=1)
+            
+            max_arb = arbitrage_rates.max()
+            min_arb = arbitrage_rates.min()
+            
+            # Calculate percentage of days with zero arbitrage
+            total_days = HOURS_7D if len(df_period) <= HOURS_7D else HOURS_30D
+            zero_rate_pct = ((total_days - len(df_period)) / total_days) * 100
+            
+            return {
+                'bybit_success': bybit_success_rate,
+                'better_side': better_side,
+                'better_apr': better_apr,
+                'max_arb': max_arb,
+                'min_arb': min_arb,
+                'zero_rate_pct': zero_rate_pct
+            }
+        print(df.head(HOURS_7D))
+        stats_7d = calculate_period_stats(df.head(HOURS_7D))
+        stats_30d = calculate_period_stats(df.head(HOURS_30D))
+        
+        
+        return {
+            'success_rate_7d': stats_7d['bybit_success'],
+            'better_side_7d': stats_7d['better_side'],
+            'apr_7d': stats_7d['better_apr'],
+            'success_rate_30d': stats_30d['bybit_success'],
+            'better_side_30d': stats_30d['better_side'],
+            'apr_30d': stats_30d['better_apr'],
+            'max_arb_7d': stats_7d['max_arb'],
+            'min_arb_7d': stats_7d['min_arb'],
+            'max_arb_30d': stats_30d['max_arb'],
+            'min_arb_30d': stats_30d['min_arb'],
+            'current_bybit_rate': by_rate_hourly,
+            'current_hl_rate': hl_rate_hourly,
+            'zero_rate_pct_7d': stats_7d['zero_rate_pct']
+        }
+        
+    except Exception as e:
+        print(f"⚠️ Error analyzing historical data: {e}")
+        return None
 
 def get_account_value():
     try:
@@ -216,7 +417,7 @@ def place_trade_both_exchanges():
         # Proceed with Hyperliquid
         is_buy = False
         print(f"Now placing {opposite_side.upper()} position on Hyperliquid for {symbol_input}")
-        result = place_market_order_hl(asset = symbol_input, is_buy=is_buy, size = qty, slippage=0.01)
+        result = place_market_order_hl(asset = symbol_input, is_buy=is_buy, size = qty*leverage, slippage=0.01)
         pretty_print(result)
         
     elif exchange_choice == '2':  # Hyperliquid
@@ -407,17 +608,38 @@ def display_status_fixed():
 
         print(f"{symbol:<10}| {hl_rate_str:<10}| {by_rate_str:<10}| {hl_next_str:<20}| {by_next_str:<20}| {arb_str}")
 
-
     print("-" * 95)
 
-
+    # Display historical analysis for watched tokens
+    if WATCHED_TOKENS:
+        print("\n📊 Historical Analysis for Watched Tokens")
+        print("=" * 120)
+        print(f"{'Token':<8} | {'7D Success':^10} | {'7D Long':^12} | {'7D APR':^8} | {'30D Success':^10} | {'30D Long':^12} | {'30D APR':^8} | {'7D Max/Min':^14} | {'30D Max/Min':^14} | {'Current Long':^20} | {'Zero Rate %':^10}")
+        print("-" * 120)
         
+        for token in WATCHED_TOKENS:
+            analysis = analyze_historical_data(token)
+            if analysis:
+                # Determine current long side based on current rates
+                current_long = 'Bybit' if analysis['current_bybit_rate'] < analysis['current_hl_rate'] else 'Hyperliquid'
+                current_apr = abs(analysis['current_bybit_rate'] - analysis['current_hl_rate']) * 24 * 365
+                
+                print(f"{token:<8} | {analysis['success_rate_7d']:^10.2f}% | {analysis['better_side_7d']:^12} | "
+                      f"{analysis['apr_7d']:^8.2f}% | {analysis['success_rate_30d']:^10.2f}% | "
+                      f"{analysis['better_side_30d']:^12} | {analysis['apr_30d']:^8.2f}% | "
+                      f"{analysis['max_arb_7d']:^6.4f}/{analysis['min_arb_7d']:<6.4f} | "
+                      f"{analysis['max_arb_30d']:^6.4f}/{analysis['min_arb_30d']:<6.4f} | "
+                      f"{current_long:^10} ({current_apr:>6.2f}%) | {analysis['zero_rate_pct_7d']:^10.2f}%")
+        
+        print("-" * 120)
+
     print("---------------------------------------------------------------------------------------------------------------------------------")
     print("\n💡 Available Commands:")
     print("1. open  - Open new positions")
     print("2. close - Close positions")
     print("3. refresh - Refresh status")
-    print("4. quit  - Exit program")
+    print("4. watch <token> - Add token to watch list")
+    print("5. quit  - Exit program")
 
 
 
@@ -436,7 +658,8 @@ def main():
          print("1. open  - Open new positions")
          print("2. close - Close positions")
          print("3. refresh - Refresh status")
-         print("4. quit  - Exit program")
+         print("4. watch <token> - Add token to watch list")
+         print("5. quit  - Exit program")
          cmd = input("🎯 Enter command: ").strip().lower()
  
          if cmd == "1":
@@ -446,6 +669,13 @@ def main():
          elif cmd == "3":
              display_status_fixed()
          elif cmd == "4":
+             token = input("Enter token to watch: ").strip().upper()
+             if token:
+                 WATCHED_TOKENS.add(token)
+                 print(f"✅ Added {token} to watch list")
+             else:
+                 print("❌ Invalid token.")
+         elif cmd == "5":
              print("👋 Exiting.")
              break
          else:
