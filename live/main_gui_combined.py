@@ -428,24 +428,29 @@ def auto_refresh():
         time.sleep(200)
         
 def main():
-    print("📟 Combined Trader v2")
-    threading.Thread(target=auto_refresh, daemon=True).start()
-
-
-    while True:
-
-        if cmd == "1":
-            place_trade_both_exchanges()
-        elif cmd == "2":
-            close_position_menu()
-        elif cmd == "3":
-            display_status_fixed()
-        elif cmd == "4":
-            print("👋 Exiting.")
-            break
-        else:
-            print("❌ Invalid command.")
-
+     print("📟 Combined Trader v2")
+     threading.Thread(target=auto_refresh, daemon=True).start()
+ 
+     while True:
+         print("\n💡 Available Commands:")
+         print("1. open  - Open new positions")
+         print("2. close - Close positions")
+         print("3. refresh - Refresh status")
+         print("4. quit  - Exit program")
+         cmd = input("🎯 Enter command: ").strip().lower()
+ 
+         if cmd == "1":
+             place_trade_both_exchanges()
+         elif cmd == "2":
+             close_position_menu()
+         elif cmd == "3":
+             display_status_fixed()
+         elif cmd == "4":
+             print("👋 Exiting.")
+             break
+         else:
+             print("❌ Invalid command.")
+ 
 
 
 if __name__ == "__main__":
